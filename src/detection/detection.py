@@ -65,7 +65,7 @@ def run_inference_for_single_image(model, image):
     model_fn = model.signatures['serving_default']
     output_dict = model_fn(input_tensor)
 
-    num_detections = int(output_dict.pop('num_detections'))
+    num_detections = int(output_dict.pop('num_detections').numpy().item())
     output_dict = {key: value[0,:num_detections].numpy() 
                    for key, value in output_dict.items()}
     output_dict['num_detections'] = num_detections
