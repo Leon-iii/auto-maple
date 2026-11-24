@@ -21,7 +21,11 @@ class Minimap(LabelFrame):
     def display_minimap(self):
         """Updates the Main page with the current minimap."""
 
-        minimap = config.capture.minimap
+        minimap = config.capture.minimap if config.capture_mode == config.CAPTURE_MODE else {}
+        if not minimap and self.container is not None:
+            self.canvas.delete(self.container)
+            self.container = None
+            self._img = None
         if minimap:
             rune_active = minimap['rune_active']
             rune_pos = minimap['rune_pos']

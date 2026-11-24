@@ -5,6 +5,7 @@
 #       Constants       #
 #########################
 RESOURCES_DIR = 'resources'
+CAPTURE_MODE = 'MSS'
 
 
 #################################
@@ -15,6 +16,7 @@ player_pos = (0, 0)
 
 # Describes whether the main bot loop is currently running or not
 enabled = False
+capture_mode = CAPTURE_MODE
 
 # If there is another player in the map, Auto Maple will purposely make random human-like mistakes
 stage_fright = False

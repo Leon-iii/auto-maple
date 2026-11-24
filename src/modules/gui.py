@@ -41,6 +41,8 @@ class GUI:
         self.navigation.pack(expand=True, fill='both')
         self.navigation.bind('<<NotebookTabChanged>>', self._resize_window)
         self.root.focus()
+        self.pet_options = False, 1
+        self.routine_highlight = None
 
     def set_routine(self, arr):
         self.routine_var.set(arr)
@@ -75,9 +77,7 @@ class GUI:
     def start(self):
         """Starts the GUI as well as any scheduled functions."""
 
-        display_thread = threading.Thread(target=self._display_minimap)
-        display_thread.daemon = True
-        display_thread.start()
+        self._display_minimap()
 
         layout_thread = threading.Thread(target=self._save_layout)
         layout_thread.daemon = True
@@ -86,10 +86,16 @@ class GUI:
         self.root.mainloop()
 
     def _display_minimap(self):
-        delay = 1 / GUI.DISPLAY_FRAME_RATE
-        while True:
-            self.view.minimap.display_minimap()
-            time.sleep(delay)
+        pets = self.settings.pets
+        self.pet_options = pets.auto_feed.get(), pets.num_pets.get()
+        index = self.routine_highlight
+        if index is not None:
+            self.routine_highlight = None
+            if config.enabled and index < len(config.routine):
+                self.view.routine.select(index)
+                self.view.details.display_info(index)
+        self.view.minimap.display_minimap()
+        self.root.after(1000 // GUI.DISPLAY_FRAME_RATE, self._display_minimap)
 
     def _save_layout(self):
         """Periodically saves the current Layout object."""

@@ -83,6 +83,8 @@ class Layout:
         :param y:   The y-position of the new point.
         :return:    None
         """
+        if config.capture_mode != config.CAPTURE_MODE:
+            return
 
         def add_helper(node):
             if not node:

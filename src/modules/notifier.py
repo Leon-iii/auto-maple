@@ -9,14 +9,7 @@ import threading
 import numpy as np
 import keyboard as kb
 from src.routine.components import Point
-
-
-# A rune's symbol on the minimap
-RUNE_RANGES = (
-    ((141, 148, 245), (146, 158, 255)),
-)
-rune_filtered = utils.filter_color(cv2.imread('assets/rune_template.png'), RUNE_RANGES)
-RUNE_TEMPLATE = cv2.cvtColor(rune_filtered, cv2.COLOR_BGR2GRAY)
+from src.detection.minimap_rune import find_runes
 
 # Other players' symbols on the minimap
 OTHER_RANGES = (
@@ -60,8 +53,11 @@ class Notifier:
         prev_others = 0
         rune_start_time = time.time()
         while True:
-            if config.enabled:
+            if config.enabled and config.capture_mode == config.CAPTURE_MODE:
                 frame = config.capture.frame
+                if frame is None or 'minimap' not in config.capture.minimap:
+                    time.sleep(.05)
+                    continue
                 height, width, _ = frame.shape
                 minimap = config.capture.minimap['minimap']
 
@@ -88,8 +84,7 @@ class Notifier:
                 # Check for rune
                 now = time.time()
                 if not config.bot.rune_active:
-                    filtered = utils.filter_color(minimap, RUNE_RANGES)
-                    matches = utils.multi_match(filtered, RUNE_TEMPLATE, threshold=0.9)
+                    matches = find_runes(minimap)
                     rune_start_time = now
                     if matches and config.routine.sequence:
                         abs_rune_pos = (matches[0][0], matches[0][1])

@@ -1,35 +1,32 @@
 """The central program that ties all the modules together."""
 
-import time
-from src.modules.bot import Bot
-from src.modules.capture import Capture
-from src.modules.notifier import Notifier
-from src.modules.listener import Listener
-from src.modules.gui import GUI
+def main():
+    from src.common.vkeys import disarm_leonardo, stop_dry_run
+    from src.modules.bot import Bot
+    from src.modules.capture import Capture
+    from src.modules.notifier import Notifier
+    from src.modules.listener import Listener
+    from src.modules.gui import GUI
+
+    bot = Bot()
+    capture = Capture()
+    notifier = Notifier()
+    listener = Listener()
+
+    bot.start()
+    gui = GUI()
+    capture.start()
+    notifier.start()
+    listener.start()
+
+    print('\n[~] Successfully initialized Auto Maple')
+    try:
+        gui.start()
+    finally:
+        stop_dry_run()
+        disarm_leonardo(wait=True)
+        capture.close()
 
 
-bot = Bot()
-capture = Capture()
-notifier = Notifier()
-listener = Listener()
-
-bot.start()
-while not bot.ready:
-    time.sleep(0.01)
-
-capture.start()
-while not capture.ready:
-    time.sleep(0.01)
-
-notifier.start()
-while not notifier.ready:
-    time.sleep(0.01)
-
-listener.start()
-while not listener.ready:
-    time.sleep(0.01)
-
-print('\n[~] Successfully initialized Auto Maple')
-
-gui = GUI()
-gui.start()
+if __name__ == '__main__':
+    main()

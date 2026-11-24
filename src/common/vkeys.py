@@ -1,10 +1,17 @@
 """A module for simulating low-level keyboard and mouse key presses."""
 
 import ctypes
+import json
+import re
+import threading
 import time
 import win32con
 import win32api
-from src.common import utils
+import win32gui
+from src.common import config, utils
+from src.common.hid_keyboard import KeyboardOutputError, LeonardoKeyboard, key_usage
+from src.common.focus_marker import MARKER_TTL
+from time import monotonic, monotonic_ns, time_ns
 from ctypes import wintypes
 from random import random
 
@@ -174,36 +181,361 @@ user32.SendInput.argtypes = (wintypes.UINT, LPINPUT, ctypes.c_int)
 #################################
 #           Functions           #
 #################################
+class _SendInput:
+    @staticmethod
+    def key_down(key):
+        """
+        Simulates a key-down action. Can be cancelled by Bot.toggle_enabled.
+        :param key:     The key to press.
+        :return:        None
+        """
+
+        key = key.lower()
+        if key not in KEY_MAP.keys():
+            print(f"Invalid keyboard input: '{key}'.")
+        else:
+            x = Input(type=INPUT_KEYBOARD, ki=KeyboardInput(wVk=KEY_MAP[key]))
+            user32.SendInput(1, ctypes.byref(x), ctypes.sizeof(x))
+
+    @staticmethod
+    def key_up(key):
+        """
+        Simulates a key-up action. Cannot be cancelled by Bot.toggle_enabled.
+        This is to ensure no keys are left in the 'down' state when the program pauses.
+        :param key:     The key to press.
+        :return:        None
+        """
+
+        key = key.lower()
+        if key not in KEY_MAP.keys():
+            print(f"Invalid keyboard input: '{key}'.")
+        else:
+            x = Input(type=INPUT_KEYBOARD, ki=KeyboardInput(wVk=KEY_MAP[key], dwFlags=KEYEVENTF_KEYUP))
+            user32.SendInput(1, ctypes.byref(x), ctypes.sizeof(x))
+
+    @staticmethod
+    def click(position, button='left'):
+        """
+        Simulate a mouse click with BUTTON at POSITION.
+        :param position:    The (x, y) position at which to click.
+        :param button:      Either the left or right mouse button.
+        :return:            None
+        """
+
+        if button not in ['left', 'right']:
+            print(f"'{button}' is not a valid mouse button.")
+        else:
+            if button == 'left':
+                down_event = win32con.MOUSEEVENTF_LEFTDOWN
+                up_event = win32con.MOUSEEVENTF_LEFTUP
+            else:
+                down_event = win32con.MOUSEEVENTF_RIGHTDOWN
+                up_event = win32con.MOUSEEVENTF_RIGHTUP
+            win32api.SetCursorPos(position)
+            win32api.mouse_event(down_event, position[0], position[1], 0, 0)
+            win32api.mouse_event(up_event, position[0], position[1], 0, 0)
+
+
+OUTPUT_MODE = 'SendInput'
+_output = _SendInput()
+input_lock = threading.RLock()
+held_keys = set()
+_leonardo = None
+_probe = None
+_dry_binding = None
+_dry_held = set()
+_dry_count = 0
+dry_status = 'Dry run ready. No physical input.'
+
+
+def external_keyboard():
+    return _leonardo
+
+
+def _video_context(observation):
+    frame = observation.frame
+    return {'capture_session': frame.session, 'frame': frame.number, 'captured_at': frame.received}
+
+
+def _log(event, **fields):
+    try:
+        print(json.dumps({'event': event, 'utc_ns': time_ns(), 'monotonic_ns': monotonic_ns(), **fields}),
+              flush=True)
+    except OSError:
+        pass
+
+
+def _uart_observation(code):
+    code = code.strip().lower()
+    if not re.fullmatch(r'[0-9a-f]{8}', code) or config.capture_mode == config.CAPTURE_MODE:
+        raise KeyboardOutputError('Open GC311G2 and enter the test window’s eight-digit code.')
+    observation = config.capture.usb_observation()
+    proof = observation.focus
+    if (observation.status.state != 'STREAMING' or not observation.status.actual
+            or observation.frame is None or proof is None or proof.code != code
+            or monotonic() - proof.advanced >= MARKER_TTL):
+        raise KeyboardOutputError('The confirmed test window marker is missing or stale.')
+    binding = code, proof.epoch, observation.frame.session, observation.status.actual
+    return binding, observation
+
+
+def uart_approval(code):
+    return _uart_observation(code)[0]
+
+
+def plan_uart_probe(code, hold):
+    with input_lock:
+        if _leonardo is not None or not .05 <= hold <= 5:
+            raise KeyboardOutputError('Select dry run and enter an F8 hold between 0.05 and 5 seconds.')
+        approval, observed = _uart_observation(code)
+        context = _video_context(observed)
+        _log('planned_key', output='Dry run', code=approval[0], key='f8', down=True,
+             offset_seconds=0, actual_output=0, **context)
+        _log('planned_key', output='Dry run', code=approval[0], key='f8', down=False,
+             offset_seconds=hold, actual_output=0, **context)
+
+
+def arm_uart(port, approval):
+    global _leonardo
+    with input_lock:
+        if config.enabled or getattr(config.bot, 'executing_step', False) or held_keys:
+            raise KeyboardOutputError('Stop the routine before arming the UART test.')
+        if _leonardo is not None and not _leonardo.finished:
+            raise KeyboardOutputError('Disarm the current Leonardo session first.')
+        code = approval[0]
+        if uart_approval(code) != approval:
+            raise KeyboardOutputError('The capture or test target has changed. Confirm it again.')
+
+        def target_ok():
+            try:
+                current, observed = _uart_observation(code)
+                if current == approval:
+                    return _video_context(observed)
+            except KeyboardOutputError:
+                pass
+            return False
+
+        def audit(event, response, fields):
+            if response is not None:
+                fields = {**fields, 'seq': response.seq, 'hid_session': response.session_id}
+            _log(event, output='Leonardo UART', code=code, **fields)
+
+        _leonardo = LeonardoKeyboard(port, target_ok, lambda: True, uart=True, focus_timeout=.1, audit=audit)
+        _log('target_confirmed', output='Leonardo UART', port=port, code=code,
+             marker_epoch=approval[1], capture_session=approval[2], usb_mode=approval[3])
+        _leonardo.start()
+
+
+def send_uart_probe(hold):
+    global _probe
+    with input_lock:
+        selected = _leonardo
+        if selected is None or not selected.uart or not selected.armed or config.capture_mode == config.CAPTURE_MODE:
+            raise KeyboardOutputError('Arm the GC311G2 test target first.')
+        if not .05 <= hold <= 5:
+            raise KeyboardOutputError('F8 hold must be between 0.05 and 5 seconds.')
+        if _probe is not None and _probe.is_alive():
+            raise KeyboardOutputError('The previous F8 probe is still running.')
+
+        def probe():
+            try:
+                selected.key('f8', True)
+                if not selected.wait_cancel(hold):
+                    selected.key('f8', False)
+            except KeyboardOutputError as error:
+                _log('probe_interrupted', output='Leonardo UART', reason=str(error))
+
+        _probe = threading.Thread(target=probe, name='Leonardo F8 probe', daemon=True)
+        _probe.start()
+
+
+def dry_running():
+    return _dry_binding is not None and config.enabled
+
+
+def _dry_observation():
+    observation = config.capture.usb_observation()
+    if observation.frame is None or not observation.player or not observation.minimap_box:
+        return None, observation
+    return (observation.frame.session, observation.minimap_box), observation
+
+
+def start_dry_run():
+    global _dry_binding, _dry_count, dry_status
+    with input_lock:
+        if config.capture_mode == config.CAPTURE_MODE or _leonardo is not None:
+            raise KeyboardOutputError('Select GC311G2 dry run first.')
+        if config.enabled or getattr(config.bot, 'executing_step', False):
+            raise KeyboardOutputError('Wait for the current command to stop.')
+        if not config.bot.ready:
+            raise KeyboardOutputError('The Auto Maple routine worker is unavailable.')
+        config.bot.validate_keyboard_only()
+        binding, observation = _dry_observation()
+        if binding is None:
+            raise KeyboardOutputError('Wait for a fresh minimap and player position.')
+        _dry_binding, _dry_count = binding, 0
+        config.bot.rune_active = False
+        config.stage_fright = False
+        config.routine.index = 0
+        _update_dry_position(observation)
+        config.enabled = True
+        dry_status = 'Dry routine running. Planned edges: 0. Actual output: 0.'
+        _log('dry_run_started', **_video_context(observation), minimap=observation.minimap_box,
+             player=observation.player, actual_output=0)
+
+
+def refresh_dry_run():
+    if _dry_binding is None:
+        return None
+    with input_lock:
+        if _dry_binding is None:
+            return None
+        if not config.enabled:
+            stop_dry_run('Routine paused.')
+            return None
+        binding, observation = _dry_observation()
+        if binding != _dry_binding:
+            stop_dry_run('Fresh video, minimap calibration, or player position was lost.')
+            return None
+        _update_dry_position(observation)
+        return observation
+
+
+def _update_dry_position(observation):
+    config.player_pos = observation.player
+    config.capture.minimap_ratio = observation.minimap_box[2] / observation.minimap_box[3]
+
+
+def stop_dry_run(reason='Dry run stopped.'):
+    global _dry_binding, _dry_count, dry_status
+    with input_lock:
+        if _dry_binding is None:
+            return
+        config.enabled = False
+        config.bot.rune_active = False
+        config.path = []
+        for key in sorted(_dry_held):
+            _log('planned_key', key=key, down=False, actual_output=0, reason=reason)
+            _dry_count += 1
+        _dry_held.clear()
+        _dry_binding = None
+        dry_status = f'{reason} Planned edges: {_dry_count}. Actual output: 0.'
+        _log('dry_run_stopped', reason=reason, planned_edges=_dry_count, actual_output=0)
+
+
+def _dry_key(key, down):
+    global _dry_count, dry_status
+    observation = refresh_dry_run()
+    if observation is None:
+        return
+    usage = key_usage(key)
+    key = key.lower()
+    if not down and key not in _dry_held:
+        return
+    if down:
+        if key not in _dry_held and usage < 0xE0:
+            if sum(key_usage(held) < 0xE0 for held in _dry_held) >= 6:
+                raise KeyboardOutputError('Leonardo supports up to six held non-modifier keys.')
+        _dry_held.add(key)
+    else:
+        _dry_held.remove(key)
+    _dry_count += 1
+    _log('planned_key', key=key, down=down, **_video_context(observation), actual_output=0)
+    dry_status = f'Dry routine running. Planned edges: {_dry_count}. Actual output: 0.'
+
+
+def arm_leonardo(port, target):
+    global _leonardo
+    with input_lock:
+        if (config.capture_mode != config.CAPTURE_MODE or config.enabled or held_keys
+                or getattr(config.bot, 'executing_step', False)):
+            raise KeyboardOutputError('Pause input and select MSS before arming Leonardo.')
+        if _leonardo is not None and not _leonardo.finished:
+            raise KeyboardOutputError('Disarm the current Leonardo session first.')
+        current = config.capture.local_target
+        if current is None or current[0] != target or monotonic() - current[1] >= .75:
+            raise KeyboardOutputError('Open MapleStory and wait for the MSS capture.')
+
+        def target_ok():
+            current = config.capture.local_target
+            return (config.capture_mode == config.CAPTURE_MODE and current is not None
+                    and current[0] == target and monotonic() - current[1] < .75
+                    and win32gui.GetForegroundWindow() == target)
+
+        def routine_running():
+            return config.enabled and config.bot.thread.is_alive()
+
+        def stop_routine():
+            config.enabled = False
+
+        _leonardo = LeonardoKeyboard(port, target_ok, routine_running, on_disarm=stop_routine)
+        _leonardo.start()
+
+
+def disarm_leonardo(*, wait=False):
+    with input_lock:
+        selected = _leonardo
+        if selected is not None:
+            config.enabled = False
+            selected.stop()
+    if wait and selected is not None:
+        selected.wait(2)
+
+
+def use_send_input():
+    global _leonardo
+    with input_lock:
+        if _leonardo is not None and not _leonardo.finished:
+            raise KeyboardOutputError('Disarm Leonardo and wait for the session to close.')
+        if _leonardo is not None:
+            if getattr(config.bot, 'executing_step', False):
+                raise KeyboardOutputError('Wait for the stopped routine to finish its current command.')
+            config.enabled = False
+        _leonardo = None
+
+
+def _external_key(key, down):
+    try:
+        _leonardo.key(key, down)
+    except KeyboardOutputError:
+        disarm_leonardo()
+        raise
+
+
 @utils.run_if_enabled
 def key_down(key):
-    """
-    Simulates a key-down action. Can be cancelled by Bot.toggle_enabled.
-    :param key:     The key to press.
-    :return:        None
-    """
-
-    key = key.lower()
-    if key not in KEY_MAP.keys():
-        print(f"Invalid keyboard input: '{key}'.")
-    else:
-        x = Input(type=INPUT_KEYBOARD, ki=KeyboardInput(wVk=KEY_MAP[key]))
-        user32.SendInput(1, ctypes.byref(x), ctypes.sizeof(x))
+    with input_lock:
+        if config.capture_mode != config.CAPTURE_MODE:
+            return _dry_key(key, True)
+        if config.enabled:
+            if _leonardo is not None:
+                return _external_key(key, True)
+            _output.key_down(key)
+            if key.lower() in KEY_MAP:
+                held_keys.add(key.lower())
 
 
 def key_up(key):
-    """
-    Simulates a key-up action. Cannot be cancelled by Bot.toggle_enabled.
-    This is to ensure no keys are left in the 'down' state when the program pauses.
-    :param key:     The key to press.
-    :return:        None
-    """
+    with input_lock:
+        if config.capture_mode != config.CAPTURE_MODE:
+            return _dry_key(key, False)
+        if _leonardo is not None:
+            return _external_key(key, False)
+        _output.key_up(key)
+        held_keys.discard(key.lower())
 
-    key = key.lower()
-    if key not in KEY_MAP.keys():
-        print(f"Invalid keyboard input: '{key}'.")
-    else:
-        x = Input(type=INPUT_KEYBOARD, ki=KeyboardInput(wVk=KEY_MAP[key], dwFlags=KEYEVENTF_KEYUP))
-        user32.SendInput(1, ctypes.byref(x), ctypes.sizeof(x))
+
+@utils.run_if_enabled
+def click(position, button='left'):
+    with input_lock:
+        if dry_running():
+            stop_dry_run('Routine requires mouse input.')
+            raise KeyboardOutputError('This command requires mouse output.')
+        if config.enabled and config.capture_mode == config.CAPTURE_MODE:
+            if _leonardo is not None:
+                disarm_leonardo()
+                raise KeyboardOutputError('This command requires mouse output. Leonardo is keyboard only.')
+            return _output.click(position, button)
 
 
 @utils.run_if_enabled
@@ -222,26 +554,3 @@ def press(key, n, down_time=0.05, up_time=0.1):
         time.sleep(down_time * (0.8 + 0.4 * random()))
         key_up(key)
         time.sleep(up_time * (0.8 + 0.4 * random()))
-
-
-@utils.run_if_enabled
-def click(position, button='left'):
-    """
-    Simulate a mouse click with BUTTON at POSITION.
-    :param position:    The (x, y) position at which to click.
-    :param button:      Either the left or right mouse button.
-    :return:            None
-    """
-
-    if button not in ['left', 'right']:
-        print(f"'{button}' is not a valid mouse button.")
-    else:
-        if button == 'left':
-            down_event = win32con.MOUSEEVENTF_LEFTDOWN
-            up_event = win32con.MOUSEEVENTF_LEFTUP
-        else:
-            down_event = win32con.MOUSEEVENTF_RIGHTDOWN
-            up_event = win32con.MOUSEEVENTF_RIGHTUP
-        win32api.SetCursorPos(position)
-        win32api.mouse_event(down_event, position[0], position[1], 0, 0)
-        win32api.mouse_event(up_event, position[0], position[1], 0, 0)

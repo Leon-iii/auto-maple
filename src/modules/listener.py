@@ -5,7 +5,7 @@ import threading
 import winsound
 import keyboard as kb
 from src.common.interfaces import Configurable
-from src.common import config, utils
+from src.common import config, utils, vkeys
 from datetime import datetime
 
 
@@ -46,13 +46,19 @@ class Listener(Configurable):
 
         self.ready = True
         while True:
-            if self.enabled:
+            if self.enabled and config.capture_mode == config.CAPTURE_MODE:
                 if kb.is_pressed(self.config['Start/stop']):
                     Listener.toggle_enabled()
                 elif kb.is_pressed(self.config['Reload routine']):
                     Listener.reload_routine()
                 elif self.restricted_pressed('Record position'):
                     Listener.record_position()
+            elif config.capture_mode != config.CAPTURE_MODE:
+                selected = vkeys.external_keyboard()
+                if (vkeys.dry_running() or (selected is not None and not selected.finished)) \
+                        and kb.is_pressed(self.config['Start/stop']):
+                    vkeys.stop_dry_run()
+                    vkeys.disarm_leonardo()
             time.sleep(0.01)
 
     def restricted_pressed(self, action):
@@ -71,12 +77,34 @@ class Listener(Configurable):
     def toggle_enabled():
         """Resumes or pauses the current routine. Plays a sound to notify the user."""
 
+        if config.capture_mode != config.CAPTURE_MODE:
+            return
         config.bot.rune_active = False
 
         if not config.enabled:
+            selected = vkeys.external_keyboard()
+            if selected is not None and not selected.armed:
+                return
             Listener.recalibrate_minimap()      # Recalibrate only when being enabled.
 
-        config.enabled = not config.enabled
+        with vkeys.input_lock:
+            if config.capture_mode != config.CAPTURE_MODE:
+                return
+            selected = vkeys.external_keyboard()
+            if selected is not None:
+                if config.enabled:
+                    vkeys.disarm_leonardo()
+                else:
+                    try:
+                        config.bot.validate_keyboard_only()
+                        config.enabled = True
+                        selected.start_run()
+                    except vkeys.KeyboardOutputError as error:
+                        print(f'[Leonardo] {error}')
+                        vkeys.disarm_leonardo()
+                        return
+            else:
+                config.enabled = not config.enabled
         utils.print_state()
 
         if config.enabled:
@@ -99,6 +127,8 @@ class Listener(Configurable):
     def recalibrate_minimap():
         config.capture.calibrated = False
         while not config.capture.calibrated:
+            if config.capture_mode != config.CAPTURE_MODE:
+                return
             time.sleep(0.01)
         config.gui.edit.minimap.redraw()
 

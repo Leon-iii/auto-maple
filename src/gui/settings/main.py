@@ -3,7 +3,9 @@
 import tkinter as tk
 from src.gui.interfaces import KeyBindings
 from src.gui.settings.pets import Pets
-from src.gui.interfaces import Tab, Frame
+from src.gui.settings.keyboard import KeyboardPanel
+from src.gui.settings.video import VideoPanel
+from src.gui.interfaces import Tab, Frame, LabelFrame
 from src.common import config
 
 
@@ -22,9 +24,15 @@ class Settings(Tab):
         self.common_bindings.pack(side=tk.TOP, fill='x', expand=True, pady=(10, 0))
         self.pets = Pets(self.column1)
         self.pets.pack(side=tk.TOP, fill='x', expand=True, pady=(10, 0))
+        self.keyboard = KeyboardPanel(self.column1)
+        self.keyboard.pack(fill='x', pady=(10, 0))
 
         self.column2 = Frame(self)
         self.column2.grid(row=0, column=2, sticky=tk.N, padx=10, pady=10)
+        self.capture_input = LabelFrame(self.column2, 'Capture & Input')
+        self.capture_input.pack(side=tk.TOP, fill='x', expand=True, pady=(0, 10))
+        self.video = VideoPanel(self.capture_input)
+        self.video.pack(fill='x')
         self.class_bindings = KeyBindings(self.column2, f'No Command Book Selected', None)
         self.class_bindings.pack(side=tk.TOP, fill='x', expand=True)
 

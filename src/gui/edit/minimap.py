@@ -37,6 +37,12 @@ class Minimap(LabelFrame):
             img = self.resize_to_fit(minimap)
             self.draw(img)
 
+    def clear(self):
+        if self.container is not None:
+            self.canvas.delete(self.container)
+            self.container = None
+            self._img = None
+
     def redraw(self):
         """Re-draws the current point if it exists, otherwise resets to the default state."""
 

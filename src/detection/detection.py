@@ -112,6 +112,10 @@ def get_boxes(model, image):
 
 @utils.run_if_enabled
 def merge_detection(model, image):
+    return detect_rune(model, image)
+
+
+def detect_rune(model, image):
     """
     Run two inferences: one on the upright image, and one on the image rotated 90 degrees.
     Only considers vertical arrows and merges the results of the two inferences together.
